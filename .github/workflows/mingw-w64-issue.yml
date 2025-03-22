@@ -1,0 +1,91 @@
+name: MinGW-w64 issue
+
+on: [push, pull_request]
+
+jobs:
+  issue-reproduction:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: cmd
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [ "vs", "mingw" ]
+        lua:
+          - { interpreter: 'lua',    version: "5.4" }
+          - { interpreter: 'lua',    version: "5.3" }
+          - { interpreter: 'lua',    version: "5.2" }
+          - { interpreter: 'lua',    version: "5.1" }
+          - { interpreter: 'luajit', version: "2.1" }
+        zlibVersion: [ "1.3.1" ]
+
+    env:
+      LUAROCKS_DEPS_DIR: C:\external
+      LUA_LUAROCKS_INSTALL_DIR: C:\Lua
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC command prompt
+        if: ${{ matrix.toolchain == 'vs' }}
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Download, extract, configure, build and install zlib
+        run: |
+          curl -L -O "https://zlib.net/fossils/zlib-${{ matrix.zlibVersion }}.tar.gz"
+          tar -xf "zlib-${{ matrix.zlibVersion }}.tar.gz"
+
+          IF "${{ matrix.toolchain }}"=="vs" (
+            SET CMAKE_GENERATOR=NMake Makefiles
+            SET CC=cl
+          ) ELSE (
+            SET CMAKE_GENERATOR=MinGW Makefiles
+            SET CC=gcc
+          )
+
+          cmake ^
+            -G "%CMAKE_GENERATOR%" ^
+            -DCMAKE_C_COMPILER=%CC% ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DBUILD_SHARED_LIBS=ON ^
+            --install-prefix "${{ env.LUAROCKS_DEPS_DIR }}" ^
+            -S "zlib-${{ matrix.zlibVersion }}" ^
+            -B build-zlib && ^
+          cmake --build build-zlib --config Release && ^
+          cmake --install build-zlib --config Release
+
+          echo ${{ env.LUAROCKS_DEPS_DIR }}\bin>>${{ github.path }}
+
+      - name: Setup Lua and LuaRocks through hererocks
+        run: |
+          SET "LUA_INSTALL_DIR=${{ env.LUA_LUAROCKS_INSTALL_DIR }}"
+          SET "LUA_INSTALL_BIN_DIR=%LUA_INSTALL_DIR%\bin"
+
+          pip install git+https://github.com/luarocks/hererocks && ^
+          hererocks ^
+            "%LUA_INSTALL_DIR%" ^
+            "--${{ matrix.lua.interpreter }}" "${{ matrix.lua.version }}" ^
+            --luarocks latest ^
+            --target=${{ matrix.toolchain }}
+
+          IF %ERRORLEVEL% NEQ 0 (
+            echo Failed to install Lua / LuaRocks
+            exit /B 1
+          )
+
+          echo %LUA_INSTALL_BIN_DIR%>>${{ github.path }}
+
+      - name: Configure LuaRocks for MinGW-w64
+        if: ${{ matrix.toolchain == 'mingw' }}
+        run: luarocks config variables.LUA_LIBDIR "${{ env.LUA_LUAROCKS_INSTALL_DIR }}\bin"
+
+      - name: Display LuaRocks configuration
+        run: luarocks
+
+      - name: Build lua-zlib
+        run: luarocks make rockspecs/lua-zlib-1.2-2.rockspec
+
+      - name: Run test
+        run: lua test.lua
